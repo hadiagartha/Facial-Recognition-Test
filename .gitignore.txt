@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+last_test_capture.jpg
+Agartha_Postgres_Report_*.txt
+.env
