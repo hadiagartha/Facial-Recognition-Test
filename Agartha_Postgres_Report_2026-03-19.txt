@@ -1,9 +1,0 @@
-
-AGARTHA WORLD: POSTGRES OPERATIONAL REPORT
-Generated: 2026-03-19 11:25:40
---------------------------------------------------
-TOTAL GUESTS:   2
-AVG STAY:       5.04 seconds
-PEAK HOUR:      11:00
-MAX STAY:       5.05 seconds
---------------------------------------------------
