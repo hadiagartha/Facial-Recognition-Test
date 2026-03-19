@@ -1,0 +1,19 @@
+
+==================================================
+SURVEILLANCE ANALYTICS: OPERATIONAL SUMMARY
+Target Date: 2026-03-19 | Generated: 12:30:38
+==================================================
+
+[Visitor Analytics]
+--------------------------------------------------
+Unique Visitors Tracked:  2
+Mean Dwell Time:          5.03s
+Peak Dwell Time:          5.03s
+
+[Traffic Distribution]
+--------------------------------------------------
+Peak Operational Hour:    12:00
+
+  - Interval 12:00: 2 Visitors
+
+==================================================
