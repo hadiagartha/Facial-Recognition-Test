@@ -1,5 +1,24 @@
+# --- Python Artifacts ---
 __pycache__/
-*.pyc
-last_test_capture.jpg
-Agartha_Postgres_Report_*.txt
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# --- Project Specific Outputs ---
+*.txt
+*.jpg
+*.jpeg
+*.png
+!staff_photos/  # Do NOT ignore the staff folder itself
+staff_photos/* # BUT ignore images inside if you want to keep them private
+                # (Remove the line above if you WANT staff photos on GitHub)
+
+# --- Database & Environment ---
 .env
+*.log
+*.sql
+
+# --- Large AI Models ---
+*.pt
+*.onnx
