@@ -10,8 +10,8 @@ from ultralytics import YOLO
 ZONE_NAME = "Main Entrance"
 LOG_STAY_DURATION = 5 
 STAFF_FOLDER = "staff_photos"
-DISTANCE_THRESHOLD = 0.55  # Relaxed slightly from 0.45 for better recognition
-RECOGNITION_FRAME_SKIP = 10 # Only check faces every 10 frames to save CPU
+DISTANCE_THRESHOLD = 0.50  # Balanced strictness
+RECOGNITION_FRAME_SKIP = 10 
 
 # --- POSTGRES CONFIG ---
 DB_PASS = "Hadi@1823" 
@@ -54,16 +54,13 @@ def setup_db(reset=False):
     except Exception as e: print(f"DB Offline: {e}"); db_online = False
 
 load_staff()
-setup_db(reset=True)
+setup_db(reset=False) # Changed to False so it doesn't wipe your data every run
 
 while cap.isOpened():
     success, frame = cap.read()
     if not success: break
     
     frame_count += 1
-    # Speed hack: Resize frame for processing, but keep original for display
-    small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-    
     results = model.track(frame, persist=True, classes=[0], verbose=False, conf=0.5)
     annotated_frame = frame.copy()
     live_guest_count = 0
@@ -79,11 +76,7 @@ while cap.isOpened():
             x1, y1 = max(0, int(x-w/2)), max(0, int(y-h/2))
             x2, y2 = min(frame.shape[1], int(x+w/2)), min(frame.shape[0], int(y+h/2))
             
-            # --- OPTIMIZED IDENTIFICATION ---
-            # Only run face recognition if:
-            # 1. We don't know who this is yet
-            # 2. We are on a 'skip' frame (saves CPU)
-            # 3. The person is close enough (box area > 8000)
+            # --- IDENTIFICATION ---
             if p_id not in identified_people and frame_count % RECOGNITION_FRAME_SKIP == 0:
                 if w * h > 8000:
                     face_crop = frame[y1:y2, x1:x2]
@@ -93,28 +86,38 @@ while cap.isOpened():
                     if encs and len(known_encodings) > 0:
                         distances = face_recognition.face_distance(known_encodings, encs[0])
                         best_match_index = np.argmin(distances)
-                        dist = distances[best_match_index]
-                        
-                        # DEBUG: See the distance in terminal
-                        print(f"ID {p_id} distance: {dist:.2f} (Target < {DISTANCE_THRESHOLD})")
-
-                        if dist < DISTANCE_THRESHOLD:
+                        if distances[best_match_index] < DISTANCE_THRESHOLD:
                             identified_people[p_id] = known_names[best_match_index]
                         else:
                             identified_people[p_id] = "GUEST"
 
             identity = identified_people.get(p_id, "IDENTIFYING...")
             
-            # Draw and Log logic (same as before)
+            # Draw Logic
             color = (255, 0, 0) if identity not in ["GUEST", "IDENTIFYING..."] else (0, 255, 0)
             label = f"STAFF: {identity}" if color == (255, 0, 0) else f"GUEST {p_id}"
-            if identity == "GUEST": live_guest_count += 1
+            
+            # Only count and log Guests
+            if identity == "GUEST": 
+                live_guest_count += 1
+                if p_id not in counted_guests:
+                    if p_id not in first_seen_times: first_seen_times[p_id] = curr_time
+                    if curr_time - first_seen_times[p_id] >= LOG_STAY_DURATION:
+                        counted_guests.add(p_id)
+                        log_guest(p_id, curr_time - first_seen_times[p_id], confs[i])
 
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(annotated_frame, label, (x1, y1-10), 0, 0.6, color, 2)
 
-    # Dashboard display...
-    cv2.imshow("Agartha Optimized", annotated_frame)
+    # --- HUD DASHBOARD (Non-intrusive) ---
+    cv2.rectangle(annotated_frame, (5, 5), (280, 115), (40, 40, 40), -1)
+    cv2.putText(annotated_frame, f"LIVE GUESTS: {live_guest_count}", (20, 35), 0, 0.7, (0, 255, 255), 2)
+    cv2.putText(annotated_frame, f"TOTAL LOGGED: {len(counted_guests)}", (20, 70), 0, 0.7, (0, 255, 0), 2)
+    dot_col = (0, 255, 0) if db_online else (0, 0, 255)
+    cv2.circle(annotated_frame, (20, 100), 6, dot_col, -1)
+    cv2.putText(annotated_frame, "POSTGRES LINKED", (35, 105), 0, 0.4, (200, 200, 200), 1)
+
+    cv2.imshow("Agartha Optimized Dashboard", annotated_frame)
     if cv2.waitKey(1) & 0xFF == ord("q"): break
 
 cap.release(); cv2.destroyAllWindows()
