@@ -9,9 +9,9 @@ from ultralytics import YOLO
 # --- System Configuration ---
 ZONE_NAME = "Main Entrance"
 LOG_STAY_DURATION = 5 
-STAFF_FOLDER = "staff_photos"
-DISTANCE_THRESHOLD = 0.55  # Euclidean distance limit for face matching
-RECOGNITION_FRAME_SKIP = 5 # Frequency of facial encoding processing (frames)
+VECTOR_FOLDER = "staff_vectors"
+DISTANCE_THRESHOLD = 0.60
+RECOGNITION_FRAME_SKIP = 3
 
 # --- Database Credentials ---
 DB_PASS = "Hadi@1823" 
@@ -25,26 +25,25 @@ model = YOLO('yolov8s.pt')
 cap = cv2.VideoCapture(0)
 known_encodings = []
 known_names = []
-identified_people = {} # Cache for person ID mapping
+identified_people = {} 
 counted_guests = set()
 first_seen_times = {}
 db_online = False
 frame_count = 0 
 
 def load_staff_database():
-    """Initializes and encodes personnel images from the local repository."""
-    if not os.path.exists(STAFF_FOLDER): os.makedirs(STAFF_FOLDER)
-    for file in os.listdir(STAFF_FOLDER):
-        if file.lower().endswith((".jpg", ".jpeg", ".png")):
-            img = face_recognition.load_image_file(f"{STAFF_FOLDER}/{file}")
-            enc = face_recognition.face_encodings(img)
-            if enc:
-                known_encodings.append(enc[0])
-                known_names.append(os.path.splitext(file)[0].upper())
-    print(f"Personnel Database Initialized: {len(known_names)} records loaded.")
+    global known_encodings, known_names
+    if not os.path.exists(VECTOR_FOLDER): os.makedirs(VECTOR_FOLDER)
+    for file in os.listdir(VECTOR_FOLDER):
+        if file.endswith(".npy"):
+            name = os.path.splitext(file)[0].upper()
+            vectors = np.load(os.path.join(VECTOR_FOLDER, file))
+            for vec in vectors:
+                known_encodings.append(vec)
+                known_names.append(name)
+    print(f"Personnel Database Initialized: {len(set(known_names))} profiles loaded.")
 
 def setup_database_schema(reset=False):
-    """Establishes connection to PostgreSQL and initializes the guest_logs table."""
     global db_online
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -60,7 +59,6 @@ def setup_database_schema(reset=False):
         db_online = False
 
 def log_visitor_entry(v_id, duration, confidence):
-    """Inserts visitor telemetry data into the persistent storage backend."""
     global db_online
     try:
         conn = psycopg2.connect(**DB_CONFIG); cur = conn.cursor()
@@ -70,7 +68,7 @@ def log_visitor_entry(v_id, duration, confidence):
         db_online = True
     except: db_online = False
 
-# Initialize System Components
+# Initialize
 load_staff_database()
 setup_database_schema(reset=False)
 
@@ -79,10 +77,10 @@ while cap.isOpened():
     if not success: break
     
     frame_count += 1
-    # Generate tracking predictions via YOLOv8
     results = model.track(frame, persist=True, classes=[0], verbose=False, conf=0.5)
     annotated_frame = frame.copy()
-    live_guest_count = 0
+    live_total_count = 0
+    staff_on_duty = set()
     curr_time = time.time()
 
     if results[0].boxes is not None and results[0].boxes.id is not None:
@@ -92,53 +90,79 @@ while cap.isOpened():
 
         for i, p_id in enumerate(ids):
             x, y, w, h = boxes[i]
-            x1, y1 = max(0, int(x-w/2)), max(0, int(y-h/2))
-            x2, y2 = min(frame.shape[1], int(x+w/2)), min(frame.shape[0], int(y+h/2))
+            live_total_count += 1
             
-            # --- Biometric Verification Logic ---
-            if p_id not in identified_people and frame_count % RECOGNITION_FRAME_SKIP == 0:
-                if w * h > 8000: # Threshold for adequate facial resolution
-                    face_crop = frame[y1:y2, x1:x2]
-                    rgb_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
-                    encs = face_recognition.face_encodings(rgb_crop)
-                    
-                    if encs and len(known_encodings) > 0:
-                        distances = face_recognition.face_distance(known_encodings, encs[0])
-                        best_match_index = np.argmin(distances)
-                        if distances[best_match_index] < DISTANCE_THRESHOLD:
-                            identified_people[p_id] = known_names[best_match_index]
-                        else:
-                            identified_people[p_id] = "GUEST"
+            # --- IMPROVED DYNAMIC ANCHOR (Larger Box) ---
+            # Expanded multipliers to capture more of the head and shoulders
+            vx1 = int(x - w * 0.22)
+            vy1 = int(y - h * 0.48) 
+            vx2 = int(x + w * 0.22)
+            vy2 = int(y - h * 0.05) 
 
-            identity = identified_people.get(p_id, "PROCESSING...")
+            # --- Biometric Logic ---
+            if p_id not in identified_people:
+                identified_people[p_id] = ("GUEST", 0)
+
+            if frame_count % RECOGNITION_FRAME_SKIP == 0:
+                if w * h > 4000:
+                    cx1, cy1 = max(0, int(x-w/2)), max(0, int(y-h/2))
+                    cx2, cy2 = min(frame.shape[1], int(x+w/2)), min(frame.shape[0], int(y+h/2))
+                    face_crop = frame[cy1:cy2, cx1:cx2]
+                    if face_crop.size > 0:
+                        rgb_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+                        encs = face_recognition.face_encodings(rgb_crop)
+                        if encs and len(known_encodings) > 0:
+                            distances = face_recognition.face_distance(known_encodings, encs[0])
+                            best_match_idx = np.argmin(distances)
+                            current_dist = distances[best_match_idx]
+                            if current_dist < DISTANCE_THRESHOLD:
+                                conf_percent = max(0, (1 - (current_dist / DISTANCE_THRESHOLD)) * 100)
+                                identified_people[p_id] = (known_names[best_match_idx], conf_percent)
+                            else:
+                                identified_people[p_id] = ("GUEST", 0)
+
+            identity, confidence = identified_people[p_id]
+            is_staff = identity not in ["GUEST"]
+            if is_staff: staff_on_duty.add(identity)
+
+            # --- Visitor Logging ---
+            if identity == "GUEST" and p_id not in counted_guests:
+                if p_id not in first_seen_times: first_seen_times[p_id] = curr_time
+                dwell = curr_time - first_seen_times[p_id]
+                if dwell >= LOG_STAY_DURATION:
+                    counted_guests.add(p_id)
+                    log_visitor_entry(p_id, LOG_STAY_DURATION, confs[i])
+
+            # Visual Rendering
+            color = (255, 120, 0) if is_staff else (0, 255, 0)
+            label = f"{identity} | {confidence:.0f}%" if confidence > 0 else identity
             
-            # Dynamic Labeling and Classification
-            is_staff = identity not in ["GUEST", "PROCESSING..."]
-            color = (255, 0, 0) if is_staff else (0, 255, 0)
-            label = f"STAFF: {identity}" if is_staff else f"GUEST {p_id}"
-            
-            if identity == "GUEST": 
-                live_guest_count += 1
-                # Telemetry logging for guest dwell time
-                if p_id not in counted_guests:
-                    if p_id not in first_seen_times: first_seen_times[p_id] = curr_time
-                    dwell_time = curr_time - first_seen_times[p_id]
-                    if dwell_time >= LOG_STAY_DURATION:
-                        counted_guests.add(p_id)
-                        log_visitor_entry(p_id, dwell_time, confs[i])
+            # Draw targeting box
+            cv2.rectangle(annotated_frame, (vx1, vy1), (vx2, vy2), color, 2)
+            # Draw label at bottom
+            cv2.putText(annotated_frame, label, (vx1, vy2 + 20), 0, 0.5, color, 1)
 
-            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(annotated_frame, label, (x1, y1-10), 0, 0.6, color, 2)
+    # --- RIGHT-ALIGNED HUD ---
+    overlay = annotated_frame.copy()
+    f_w = frame.shape[1]
+    box_h = 110 + (len(staff_on_duty) * 25) if staff_on_duty else 105
+    cv2.rectangle(overlay, (f_w - 330, 10), (f_w - 10, box_h), (20, 20, 20), -1)
+    
+    cv2.addWeighted(overlay, 0.4, annotated_frame, 0.6, 0, annotated_frame)
 
-    # --- System Status HUD ---
-    cv2.rectangle(annotated_frame, (5, 5), (280, 115), (40, 40, 40), -1)
-    cv2.putText(annotated_frame, f"LIVE GUESTS: {live_guest_count}", (20, 35), 0, 0.7, (0, 255, 255), 2)
-    cv2.putText(annotated_frame, f"TOTAL LOGGED: {len(counted_guests)}", (20, 70), 0, 0.7, (0, 255, 0), 2)
-    status_color = (0, 255, 0) if db_online else (0, 0, 255)
-    cv2.circle(annotated_frame, (20, 100), 6, status_color, -1)
-    cv2.putText(annotated_frame, "DB PERSISTENCE ACTIVE", (35, 105), 0, 0.4, (200, 200, 200), 1)
+    bx = f_w - 315
+    cv2.putText(annotated_frame, f"LIVE COUNT: {live_total_count}", (bx, 35), 0, 0.6, (0, 255, 255), 1)
+    cv2.putText(annotated_frame, f"TOTAL LOGGED: {len(counted_guests)}", (bx, 65), 0, 0.6, (0, 255, 0), 1)
+    y_ptr = 95
+    for n in staff_on_duty:
+        cv2.putText(annotated_frame, f"ON SITE: {n}", (bx, y_ptr), 0, 0.45, (255, 180, 50), 1)
+        y_ptr += 25
 
-    cv2.imshow("Surveillance Analytics Dashboard", annotated_frame)
+    status_col = (0, 255, 0) if db_online else (0, 0, 255)
+    cv2.circle(annotated_frame, (bx, box_h - 12), 4, status_col, -1)
+    cv2.putText(annotated_frame, "DB PERSISTENCE ACTIVE", (bx + 15, box_h - 10), 0, 0.35, (200, 200, 200), 1)
+
+    cv2.imshow("Agartha Surveillance Analytics", annotated_frame)
     if cv2.waitKey(1) & 0xFF == ord("q"): break
 
 cap.release(); cv2.destroyAllWindows()
